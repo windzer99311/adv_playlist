@@ -16,7 +16,7 @@ USER_AGENTS = [
 ]
 
 INNERTUBE_API_URL = "https://www.youtube.com/youtubei/v1/browse"
-INNERTUBE_KEY     = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
+INNERTUBE_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
 INNERTUBE_CONTEXT = {
     "client": {
         "clientName": "WEB",
@@ -26,56 +26,65 @@ INNERTUBE_CONTEXT = {
     }
 }
 
+
 # ── URL Parser ────────────────────────────────────────────────────────────────
+
+def normalize_to_playlist_url(url: str) -> str:
+    """
+    Converts any YouTube URL into a clean playlist URL that Vercel can handle.
+      - Has list=  → https://youtube.com/playlist?list={list_id}
+      - Only v=    → https://youtube.com/playlist?list=RD{video_id}
+      - /shorts/   → https://youtube.com/playlist?list=RD{video_id}
+    """
+    url = url.replace("https://m.youtube.com", "https://www.youtube.com")
+    if not url.startswith("https://www."):
+        url = url.replace("https://youtube.com", "https://www.youtube.com")
+
+    # youtu.be/VIDEO_ID short links
+    if "youtu.be/" in url:
+        video_id = urlparse(url).path.lstrip("/")
+        return f"https://youtube.com/playlist?list=RD{video_id}"
+
+    parsed = urlparse(url)
+    qs = parse_qs(parsed.query)
+    path = parsed.path.rstrip("/")
+
+    list_id = qs.get("list", [None])[0]
+    video_id = qs.get("v", [None])[0]
+
+    # shorts
+    if "/shorts/" in path:
+        video_id = path.split("/shorts/")[1]
+
+    if list_id:
+        return f"https://youtube.com/playlist?list={list_id}"
+    elif video_id:
+        return f"https://youtube.com/playlist?list=RD{video_id}"
+    else:
+        raise ValueError(f"Could not extract list or video ID from URL: {url}")
+
 
 def parse_youtube_url(url: str) -> dict:
     """
-    Detects the type of YouTube URL and extracts relevant IDs.
+    Normalizes any YouTube URL then detects its type.
 
     Supported types:
-      - playlist      : youtube.com/playlist?list=PLxxx
-      - watch+list    : youtube.com/watch?v=xxx&list=PLxxx
-      - radio         : youtube.com/watch?v=xxx&list=RDxxx  (mix/radio)
-      - video only    : youtube.com/watch?v=xxx
-      - shorts        : youtube.com/shorts/xxx
-      - channel       : youtube.com/@handle  or  /channel/UCxxx
+      - radio   : list=RDxxx
+      - playlist: list=PLxxx / list=anything else
     """
-    # Normalize: ensure www and strip tracking params
-    url = url.replace("https://youtube.com", "https://www.youtube.com")
-    url = url.replace("https://m.youtube.com", "https://www.youtube.com")
-    parsed = urlparse(url)
-    qs     = parse_qs(parsed.query)
+    norm = normalize_to_playlist_url(url)
+    parsed = urlparse(norm)
+    qs = parse_qs(parsed.query)
+    list_id = qs.get("list", [None])[0]
 
-    video_id    = qs.get("v",    [None])[0]
-    list_id     = qs.get("list", [None])[0]
-    path        = parsed.path.rstrip("/")
+    if not list_id:
+        raise ValueError(f"Could not parse normalized URL: {norm}")
 
-    # /shorts/VIDEO_ID
-    if "/shorts/" in path:
-        return {"type": "video", "video_id": path.split("/shorts/")[1]}
+    if list_id.startswith("RD"):
+        video_id = list_id[2:]
+        return {"type": "radio", "video_id": video_id, "list_id": list_id, "normalized_url": norm}
 
-    # Radio / Mix  (list=RDxxx)
-    if list_id and list_id.startswith("RD"):
-        seed = list_id[2:] or video_id
-        return {"type": "radio", "video_id": seed, "list_id": list_id}
-
-    # Dedicated playlist page → convert to watch+list with dummy video
-    if list_id and not video_id:
-        return {"type": "watch+list", "video_id": "zaFGQEIcetM", "list_id": list_id}
-
-    # Watch page that also has a playlist
-    if video_id and list_id:
-        return {"type": "watch+list", "video_id": video_id, "list_id": list_id}
-
-    # Plain video
-    if video_id:
-        return {"type": "video", "video_id": video_id}
-
-    # Channel  /@handle  or  /channel/UCxxx  or  /c/name
-    if any(path.startswith(p) for p in ["/@", "/channel/", "/c/", "/user/"]):
-        return {"type": "channel", "channel_url": url}
-
-    raise ValueError(f"Unrecognised YouTube URL: {url}")
+    return {"type": "playlist", "list_id": list_id, "normalized_url": norm}
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -157,9 +166,9 @@ def parse_playlist_video_renderer(item: dict) -> dict | None:
     if not vid:
         return None
     return {
-        "title":     get_text(r.get("title")),
+        "title": get_text(r.get("title")),
         "thumbnail": worst_thumbnail(safe_get(r, "thumbnail", "thumbnails") or []),
-        "videoId":   vid,
+        "videoId": vid,
     }
 
 
@@ -172,9 +181,9 @@ def parse_panel_video_renderer(item: dict) -> dict | None:
     if not vid:
         return None
     return {
-        "title":     get_text(r.get("title")),
+        "title": get_text(r.get("title")),
         "thumbnail": worst_thumbnail(safe_get(r, "thumbnail", "thumbnails") or []),
-        "videoId":   vid,
+        "videoId": vid,
     }
 
 
@@ -244,14 +253,14 @@ def extract_items_from_continuation(data: dict) -> tuple[list, str | None]:
     # Items live inside onResponseReceivedActions
     for action in data.get("onResponseReceivedActions", []):
         contents = (
-            safe_get(action, "appendContinuationItemsAction", "continuationItems") or
-            safe_get(action, "reloadContinuationItemsCommand", "continuationItems") or
-            []
+                safe_get(action, "appendContinuationItemsAction", "continuationItems") or
+                safe_get(action, "reloadContinuationItemsCommand", "continuationItems") or
+                []
         )
         for c in contents:
             parsed = (
-                parse_playlist_video_renderer(c) or
-                parse_panel_video_renderer(c)
+                    parse_playlist_video_renderer(c) or
+                    parse_panel_video_renderer(c)
             )
             if parsed:
                 items.append(parsed)
@@ -283,7 +292,7 @@ def find_playlist_contents(data) -> list | None:
 
 def extract_playlist_page(list_id: str, max_pages: int = 10) -> list:
     """Extract full playlist from youtube.com/playlist?list=xxx"""
-    url  = f"https://www.youtube.com/playlist?list={list_id}"
+    url = f"https://www.youtube.com/playlist?list={list_id}"
     html = fetch_page(url)
     data = extract_initial_data(html)
 
@@ -305,7 +314,7 @@ def extract_playlist_page(list_id: str, max_pages: int = 10) -> list:
         raise ValueError("Could not find playlist contents in ytInitialData")
 
     videos = []
-    token  = None
+    token = None
     for c in contents:
         parsed = parse_playlist_video_renderer(c)
         if parsed:
@@ -316,17 +325,17 @@ def extract_playlist_page(list_id: str, max_pages: int = 10) -> list:
     # Paginate
     page = 1
     while token and page < max_pages:
-        cont_data      = fetch_continuation(token)
-        more, token    = extract_items_from_continuation(cont_data)
-        videos        += more
-        page          += 1
+        cont_data = fetch_continuation(token)
+        more, token = extract_items_from_continuation(cont_data)
+        videos += more
+        page += 1
 
     return videos
 
 
 def extract_watch_next_playlist(video_id: str, list_id: str) -> list:
     """Extract playlist shown in the watch-next panel."""
-    url  = f"https://www.youtube.com/watch?v={video_id}&list={list_id}"
+    url = f"https://www.youtube.com/watch?v={video_id}&list={list_id}"
     html = fetch_page(url)
     data = extract_initial_data(html)
 
@@ -349,7 +358,7 @@ def extract_watch_next_playlist(video_id: str, list_id: str) -> list:
 
 def extract_radio(video_id: str, list_id: str) -> list:
     """Extract YouTube Mix / Radio playlist."""
-    url  = f"https://www.youtube.com/watch?v={video_id}&list={list_id}"
+    url = f"https://www.youtube.com/watch?v={video_id}&list={list_id}"
     html = fetch_page(url)
     data = extract_initial_data(html)
 
@@ -387,16 +396,16 @@ def extract_radio(video_id: str, list_id: str) -> list:
 
 def extract_single_video(video_id: str) -> list:
     """For a plain video URL, return just its metadata as a single-item list."""
-    url  = f"https://www.youtube.com/watch?v={video_id}"
+    url = f"https://www.youtube.com/watch?v={video_id}"
     html = fetch_page(url)
     data = extract_initial_data(html)
 
     try:
         vd = data["videoDetails"]
         return [{
-            "title":     vd.get("title"),
+            "title": vd.get("title"),
             "thumbnail": worst_thumbnail(safe_get(vd, "thumbnail", "thumbnails") or []),
-            "videoId":   vd.get("videoId"),
+            "videoId": vd.get("videoId"),
         }]
     except (KeyError, TypeError):
         raise ValueError("Could not extract video details")
@@ -424,16 +433,10 @@ def get_playlist(url: str, max_pages: int = 10):
     try:
         match info["type"]:
             case "playlist":
-                videos = extract_playlist_page(info["list_id"], max_pages)
-
-            case "watch+list":
-                videos = extract_watch_next_playlist(info["video_id"], info["list_id"])
+                videos = extract_watch_next_playlist("zaFGQEIcetM", info["list_id"])
 
             case "radio":
                 videos = extract_radio(info["video_id"], info["list_id"])
-
-            case "video":
-                videos = extract_single_video(info["video_id"])
 
             case _:
                 raise HTTPException(status_code=400, detail=f"Unsupported URL type: {info['type']}")
