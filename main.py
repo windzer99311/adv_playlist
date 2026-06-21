@@ -414,7 +414,7 @@ def extract_single_video(video_id: str) -> list:
 # ── FastAPI Endpoint ──────────────────────────────────────────────────────────
 
 @app.get("/playlist")
-def get_playlist(url: str, max_pages: int = 10):
+def get_playlist(url: str):
     """
     Universal YouTube extractor.
 
