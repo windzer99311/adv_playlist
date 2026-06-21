@@ -447,3 +447,39 @@ def get_playlist(url: str, max_pages: int = 10):
         raise HTTPException(status_code=502, detail=f"YouTube request failed: {e}")
 
     return {"data": videos}
+
+
+@app.get("/next")
+def get_next_music(url: str):
+    next_music = []
+    headers = {"User-Agent": "Mozilla/5.0"}
+    response = requests.get(url, headers=headers).text
+
+    # Extract ytInitialData
+    pattern = r'var ytInitialData = ({.*?});'
+    match = re.search(pattern, response)
+    if match:
+        json_str = match.group(1)
+        data = json.loads(json_str)
+        try:
+            playlist = data["contents"]["twoColumnWatchNextResults"]["playlist"]["playlist"]["contents"]
+            for item in playlist:
+                title = item["playlistPanelVideoRenderer"]["title"]["simpleText"]
+                thumbnail = item["playlistPanelVideoRenderer"]["thumbnail"]["thumbnails"][0]["url"]
+                video_id = item["playlistPanelVideoRenderer"]["navigationEndpoint"]["watchEndpoint"]["videoId"]
+                if video_id==url.split("watch?v=")[1].split("&")[0]:
+                    continue
+                next_music.append({"title": title, "thumbnail": thumbnail, "videoId": video_id})
+        except:
+            playlist = data["contents"]["twoColumnWatchNextResults"]["secondaryResults"]["secondaryResults"]["results"]
+            for item in playlist:
+                try:
+                    title=item["lockupViewModel"]["metadata"]["lockupMetadataViewModel"]["title"]["content"]
+                    thumbnail=item["lockupViewModel"]["contentImage"]["thumbnailViewModel"]["image"]["sources"][0]["url"]
+                    video_id=item["lockupViewModel"]["metadata"]["lockupMetadataViewModel"]["menuButton"]["buttonViewModel"]["onTap"]["innertubeCommand"]["showSheetCommand"]["panelLoadingStrategy"]["inlineContent"]["sheetViewModel"]["content"]["listViewModel"]["listItems"][0]["listItemViewModel"]["rendererContext"]["commandContext"]["onTap"]["innertubeCommand"]["signalServiceEndpoint"]["actions"][0]["addToPlaylistCommand"]["videoId"]
+                    next_music.append({"title": title, "thumbnail": thumbnail, "videoId": video_id})
+                except:
+                    continue
+        return {
+            "data": next_music,
+        }
