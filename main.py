@@ -1,5 +1,3 @@
-import time
-
 import requests
 import re
 import json
@@ -42,6 +40,9 @@ def parse_youtube_url(url: str) -> dict:
       - shorts        : youtube.com/shorts/xxx
       - channel       : youtube.com/@handle  or  /channel/UCxxx
     """
+    # Normalize: ensure www and strip tracking params
+    url = url.replace("https://youtube.com", "https://www.youtube.com")
+    url = url.replace("https://m.youtube.com", "https://www.youtube.com")
     parsed = urlparse(url)
     qs     = parse_qs(parsed.query)
 
@@ -58,9 +59,9 @@ def parse_youtube_url(url: str) -> dict:
         seed = list_id[2:] or video_id
         return {"type": "radio", "video_id": seed, "list_id": list_id}
 
-    # Dedicated playlist page
+    # Dedicated playlist page → convert to watch+list with dummy video
     if list_id and not video_id:
-        return {"type": "playlist", "list_id": list_id}
+        return {"type": "watch+list", "video_id": "zaFGQEIcetM", "list_id": list_id}
 
     # Watch page that also has a playlist
     if video_id and list_id:
@@ -139,12 +140,10 @@ def get_text(obj) -> str | None:
     return None
 
 
-def best_thumbnail(thumbs: list) -> str | None:
+def worst_thumbnail(thumbs: list) -> str | None:
     if not thumbs:
         return None
-    # prefer highest resolution
-    sorted_t = sorted(thumbs, key=lambda t: t.get("width", 0), reverse=True)
-    return sorted_t[0].get("url")
+    return thumbs[0].get("url")
 
 
 # ── Item Parsers ──────────────────────────────────────────────────────────────
@@ -159,10 +158,8 @@ def parse_playlist_video_renderer(item: dict) -> dict | None:
         return None
     return {
         "title":     get_text(r.get("title")),
+        "thumbnail": worst_thumbnail(safe_get(r, "thumbnail", "thumbnails") or []),
         "videoId":   vid,
-        "thumbnail": best_thumbnail(safe_get(r, "thumbnail", "thumbnails") or []),
-        "duration":  get_text(r.get("lengthText")),
-        "index":     get_text(r.get("index")),
     }
 
 
@@ -176,10 +173,8 @@ def parse_panel_video_renderer(item: dict) -> dict | None:
         return None
     return {
         "title":     get_text(r.get("title")),
+        "thumbnail": worst_thumbnail(safe_get(r, "thumbnail", "thumbnails") or []),
         "videoId":   vid,
-        "thumbnail": best_thumbnail(safe_get(r, "thumbnail", "thumbnails") or []),
-        "duration":  get_text(r.get("lengthText")),
-        "index":     None,
     }
 
 
@@ -204,7 +199,7 @@ def parse_lockup_view_model(item: dict) -> dict | None:
         )
         if not vid:
             return None
-        return {"title": title, "videoId": vid, "thumbnail": thumb, "duration": None, "index": None}
+        return {"title": title, "thumbnail": thumb, "videoId": vid}
     except Exception:
         return None
 
@@ -269,13 +264,31 @@ def extract_items_from_continuation(data: dict) -> tuple[list, str | None]:
 
 # ── Core Extractors ───────────────────────────────────────────────────────────
 
+def find_playlist_contents(data) -> list | None:
+    """Recursively search for playlistVideoListRenderer contents anywhere in ytInitialData."""
+    if isinstance(data, dict):
+        if "playlistVideoListRenderer" in data:
+            return data["playlistVideoListRenderer"].get("contents")
+        for v in data.values():
+            result = find_playlist_contents(v)
+            if result is not None:
+                return result
+    elif isinstance(data, list):
+        for item in data:
+            result = find_playlist_contents(item)
+            if result is not None:
+                return result
+    return None
+
+
 def extract_playlist_page(list_id: str, max_pages: int = 10) -> list:
     """Extract full playlist from youtube.com/playlist?list=xxx"""
     url  = f"https://www.youtube.com/playlist?list={list_id}"
     html = fetch_page(url)
     data = extract_initial_data(html)
 
-    # Navigate to playlistVideoListRenderer
+    # Try known path first, fall back to recursive search
+    contents = None
     try:
         contents = (
             data["contents"]
@@ -286,6 +299,9 @@ def extract_playlist_page(list_id: str, max_pages: int = 10) -> list:
             ["playlistVideoListRenderer"]["contents"]
         )
     except (KeyError, IndexError, TypeError):
+        contents = find_playlist_contents(data)
+
+    if not contents:
         raise ValueError("Could not find playlist contents in ytInitialData")
 
     videos = []
@@ -379,12 +395,8 @@ def extract_single_video(video_id: str) -> list:
         vd = data["videoDetails"]
         return [{
             "title":     vd.get("title"),
+            "thumbnail": worst_thumbnail(safe_get(vd, "thumbnail", "thumbnails") or []),
             "videoId":   vd.get("videoId"),
-            "thumbnail": best_thumbnail(
-                safe_get(vd, "thumbnail", "thumbnails") or []
-            ),
-            "duration":  vd.get("lengthSeconds"),
-            "index":     None,
         }]
     except (KeyError, TypeError):
         raise ValueError("Could not extract video details")
@@ -431,9 +443,4 @@ def get_playlist(url: str, max_pages: int = 10):
     except requests.HTTPError as e:
         raise HTTPException(status_code=502, detail=f"YouTube request failed: {e}")
 
-    return {
-        "url_type": info["type"],
-        "count":    len(videos),
-        "data":     videos,
-    }
-
+    return {"data": videos}
